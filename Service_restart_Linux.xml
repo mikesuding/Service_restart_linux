@@ -5,101 +5,80 @@
   <errmsg>OK</errmsg>
   <interval>0</interval>
     <entry type="predatasource">
-        <version>1545940381</version>
+        <version>1546453997</version>
         <name>Service_restart_Linux</name>
         <displayedas>Service_restart_Linux</displayedas>
-        <description>Restarts Linux service(s) that you specify in property &#39;services_to_monitor&#39; e.g. (snmpd|chrond|httpd). 
+        <description>Restarts Linux service(s) that you specify in property &#39;services_to_monitor&#39; e.g. cron.*|rsyslog.*|snmp.* 
 Status 0=ok, 1=one restart worked, 2=two restarts worked, 3=two restarts failed. By Mike Suding</description>
         <collector>batchscript</collector>
         <hasMultiInstances>true</hasMultiInstances>
         <schedule>60</schedule>
-        <appliesTo>services_to_monitor</appliesTo>
+        <appliesTo>services_to_monitor &#38;&#38; ssh.user &#38;&#38; ssh.pass</appliesTo>
         <wildcardauto>true</wildcardauto>
         <wildcardpersist>false</wildcardpersist>
         <wildcardlinuxscript>ad_script</wildcardlinuxscript>
         <wildcardlinuxcmdline>type=&#34;embeded&#34; </wildcardlinuxcmdline>
         <wildcardwinscript>ad_script</wildcardwinscript>
         <wildcardwincmdline>type=&#34;embeded&#34; </wildcardwincmdline>
-        <wildcardgroovyscript>host = hostProps.get(&#34;system.hostname&#34;)
-user = hostProps.get(&#34;ssh.user&#34;)
-pass = hostProps.get(&#34;ssh.pass&#34;)
+        <wildcardgroovyscript>regExp_raw = hostProps.get(&#34;Services_to_monitor&#34;)
+regExp = &#39;(&#39; + regExp_raw + &#39;)&#39;
+user       = hostProps.get(&#34;ssh.user&#34;)
+pass       = hostProps.get(&#34;ssh.pass&#34;)
+host       = hostProps.get(&#34;system.hostname&#34;)
 port = 22
-regExp = hostProps.get(&#34;Services_to_monitor&#34;)
-
 import com.jcraft.jsch.*
 
-String ParseLinuxVersion (String LinuxVersion)
-{
-    String parsedVersionPart = LinuxVersion.split(&#34; &#34;)[1]
-    if (parsedVersionPart.matches(&#34;.*el7.*&#34;))
-    {
-        return &#34;RHEL7&#34;
-    }
-    else if (parsedVersionPart.matches(&#34;.*el6.*&#34;))
-    {
-        return &#34;RHEL6&#34;
-    }
-    else
-    {
-        return &#34;&#34;
-    }
-}
-
-String ExecuteSSHCommand (String hostName, String userName, String password, int port, String command)
-{
+String ExecuteSSHCommand (String hostName, String userName, String password, int port, String command) {
     JSch jsch = new JSch()
     Session session = jsch.getSession(userName, hostName, port)
     session.setPassword(password)
     session.setConfig(&#34;StrictHostKeyChecking&#34;, &#34;no&#34;)
-
     session.connect()
     Channel channel = session.openChannel(&#34;exec&#34;)
-
     channel.setCommand(command)
-
     InputStream commandOutput = channel.getInputStream()
     channel.connect()
-
     String outputString = commandOutput.text
-
     channel.disconnect()
     session.disconnect()
-
     return outputString
 }
 
-String getServiceListCommand = &#34;&#34;
-//variable for bash command - obtain list of services
-
-String linuxVersion = ExecuteSSHCommand(host, user, pass, port, &#34;uname -mrs&#34;)
-
-String targetLinuxVersion = ParseLinuxVersion(linuxVersion)
-
-if (! targetLinuxVersion)
-{
-    return 1
+String which_command (String hostName, String userName, String password, int port) {
+    String isSystemctlPresent = ExecuteSSHCommand(hostName, userName, password, port, &#34;which systemctl&#34;)
+    String isChkconfigPresent = ExecuteSSHCommand(hostName, userName, password, port, &#34;which chkconfig&#34;)
+    if (isSystemctlPresent)
+        {return &#34;SYSTEMCTL&#34;}
+    else if ((! isSystemctlPresent) &#38;&#38; isChkconfigPresent)
+        {return &#34;CHKCONFIG&#34;}
+    else {return &#34;&#34;}
 }
 
-switch (targetLinuxVersion)
-{
-    case &#34;RHEL7&#34;:
-        getServiceListCommand = &#39;systemctl list-unit-files -t service | awk \&#39;{if(NR&#62;1)print}\&#39; | awk \&#39;/^$/{exit} {print $0}\&#39; | awk \&#39;{print ($1)}\&#39; | awk \&#39;{gsub(&#34;.service&#34;,&#34;&#34;);print}\&#39;&#39;
-        // Obtain all service units, remove header line, remove totals line (stop processing after empty line), print only service name
+String getServiceListCommand
+//variable for bash command - obtain list of services
+String command_to_use = which_command(host, user, pass, port)
+
+if (! command_to_use) {  // if neither command is present then show an error in instance name
+    println &#34;1##ERROR##No compatible commands (systemctl and chkconfig)&#34;
+    return 0
+}
+
+switch (command_to_use) {
+    case &#34;SYSTEMCTL&#34;:
+        getServiceListCommand = &#39;systemctl -t service --all | awk \&#39;{if(NR&#62;1)print}\&#39; | awk \&#39;/^$/{exit} {print $0}\&#39; | awk \&#39;{print ($1)}\&#39; | awk \&#39;{gsub(&#34;.service&#34;,&#34;&#34;);print}\&#39;&#39;
+        // get all services, remove header line, remove totals line (stop processing after empty line), print only service name
         break
-    case &#34;RHEL6&#34;:
+    case &#34;CHKCONFIG&#34;:
         getServiceListCommand = &#39;chkconfig --list | awk \&#39;{print $1}\&#39;&#39;
         break
 }
 
 String rawListOfServices = ExecuteSSHCommand(host, user, pass, port, getServiceListCommand)
+String [] arrayServices = rawListOfServices.split(&#34;\n&#34;) //convert list into an array 
 
-String [] arrayServices = rawListOfServices.split(&#34;\n&#34;)
-
-arrayServices.each {
+arrayServices.each { //loop thru each item to see if it matches spec
     if (it.indexOf(&#34;@&#34;) == -1 &#38;&#38; it.matches(regExp) )
-    {
-        println &#34;${it}##${it}&#34;
-    }
+    {println &#34;${it}##${it}&#34;}
 }
 return 0</wildcardgroovyscript>
         <wildcardschedule>15</wildcardschedule>
@@ -110,7 +89,7 @@ return 0</wildcardgroovyscript>
         <group></group>
         <tags></tags>
         <technology>must set properties ssh.user, ssh.pass and &#39;services_to_monitor&#39;</technology>
-        <adlist><![CDATA[{"agdmethod":"none","method":"ad_script","agdparams":"","id":0,"filters":[],"params":{"type":"embeded","groovyscript":"host = hostProps.get(\"system.hostname\")\r\nuser = hostProps.get(\"ssh.user\")\r\npass = hostProps.get(\"ssh.pass\")\r\nport = 22\r\nregExp = hostProps.get(\"Services_to_monitor\")\r\n\r\nimport com.jcraft.jsch.*\r\n\r\nString ParseLinuxVersion (String LinuxVersion)\r\n{\r\n    String parsedVersionPart = LinuxVersion.split(\" \")[1]\r\n    if (parsedVersionPart.matches(\".*el7.*\"))\r\n    {\r\n        return \"RHEL7\"\r\n    }\r\n    else if (parsedVersionPart.matches(\".*el6.*\"))\r\n    {\r\n        return \"RHEL6\"\r\n    }\r\n    else\r\n    {\r\n        return \"\"\r\n    }\r\n}\r\n\r\nString ExecuteSSHCommand (String hostName, String userName, String password, int port, String command)\r\n{\r\n    JSch jsch = new JSch()\r\n    Session session = jsch.getSession(userName, hostName, port)\r\n    session.setPassword(password)\r\n    session.setConfig(\"StrictHostKeyChecking\", \"no\")\r\n\r\n    session.connect()\r\n    Channel channel = session.openChannel(\"exec\")\r\n\r\n    channel.setCommand(command)\r\n\r\n    InputStream commandOutput = channel.getInputStream()\r\n    channel.connect()\r\n\r\n    String outputString = commandOutput.text\r\n\r\n    channel.disconnect()\r\n    session.disconnect()\r\n\r\n    return outputString\r\n}\r\n\r\nString getServiceListCommand = \"\"\r\n//variable for bash command - obtain list of services\r\n\r\nString linuxVersion = ExecuteSSHCommand(host, user, pass, port, \"uname -mrs\")\r\n\r\nString targetLinuxVersion = ParseLinuxVersion(linuxVersion)\r\n\r\nif (! targetLinuxVersion)\r\n{\r\n    return 1\r\n}\r\n\r\nswitch (targetLinuxVersion)\r\n{\r\n    case \"RHEL7\":\r\n        getServiceListCommand = 'systemctl list-unit-files -t service | awk \\'{if(NR>1)print}\\' | awk \\'/^$/{exit} {print $0}\\' | awk \\'{print ($1)}\\' | awk \\'{gsub(\".service\",\"\");print}\\''\r\n        // Obtain all service units, remove header line, remove totals line (stop processing after empty line), print only service name\r\n        break\r\n    case \"RHEL6\":\r\n        getServiceListCommand = 'chkconfig --list | awk \\'{print $1}\\''\r\n        break\r\n}\r\n\r\nString rawListOfServices = ExecuteSSHCommand(host, user, pass, port, getServiceListCommand)\r\n\r\nString [] arrayServices = rawListOfServices.split(\"\\n\")\r\n\r\narrayServices.each {\r\n    if (it.indexOf(\"@\") == -1 && it.matches(regExp) )\r\n    {\r\n        println \"${it}##${it}\"\r\n    }\r\n}\r\nreturn 0"}}]]></adlist>
+        <adlist><![CDATA[{"agdmethod":"none","method":"ad_script","agdparams":"","id":0,"filters":[],"params":{"type":"embeded","groovyscript":"regExp_raw = hostProps.get(\"Services_to_monitor\")\r\nregExp = '(' + regExp_raw + ')'\r\nuser       = hostProps.get(\"ssh.user\")\r\npass       = hostProps.get(\"ssh.pass\")\r\nhost       = hostProps.get(\"system.hostname\")\r\nport = 22\r\nimport com.jcraft.jsch.*\r\n\r\nString ExecuteSSHCommand (String hostName, String userName, String password, int port, String command) {\r\n    JSch jsch = new JSch()\r\n    Session session = jsch.getSession(userName, hostName, port)\r\n    session.setPassword(password)\r\n    session.setConfig(\"StrictHostKeyChecking\", \"no\")\r\n    session.connect()\r\n    Channel channel = session.openChannel(\"exec\")\r\n    channel.setCommand(command)\r\n    InputStream commandOutput = channel.getInputStream()\r\n    channel.connect()\r\n    String outputString = commandOutput.text\r\n    channel.disconnect()\r\n    session.disconnect()\r\n    return outputString\r\n}\r\n\r\nString which_command (String hostName, String userName, String password, int port) {\r\n    String isSystemctlPresent = ExecuteSSHCommand(hostName, userName, password, port, \"which systemctl\")\r\n    String isChkconfigPresent = ExecuteSSHCommand(hostName, userName, password, port, \"which chkconfig\")\r\n    if (isSystemctlPresent)\r\n        {return \"SYSTEMCTL\"}\r\n    else if ((! isSystemctlPresent) && isChkconfigPresent)\r\n        {return \"CHKCONFIG\"}\r\n    else {return \"\"}\r\n}\r\n\r\nString getServiceListCommand\r\n//variable for bash command - obtain list of services\r\nString command_to_use = which_command(host, user, pass, port)\r\n\r\nif (! command_to_use) {  // if neither command is present then show an error in instance name\r\n    println \"1##ERROR##No compatible commands (systemctl and chkconfig)\"\r\n    return 0\r\n}\r\n\r\nswitch (command_to_use) {\r\n    case \"SYSTEMCTL\":\r\n        getServiceListCommand = 'systemctl -t service --all | awk \\'{if(NR>1)print}\\' | awk \\'/^$/{exit} {print $0}\\' | awk \\'{print ($1)}\\' | awk \\'{gsub(\".service\",\"\");print}\\''\r\n        // get all services, remove header line, remove totals line (stop processing after empty line), print only service name\r\n        break\r\n    case \"CHKCONFIG\":\r\n        getServiceListCommand = 'chkconfig --list | awk \\'{print $1}\\''\r\n        break\r\n}\r\n\r\nString rawListOfServices = ExecuteSSHCommand(host, user, pass, port, getServiceListCommand)\r\nString [] arrayServices = rawListOfServices.split(\"\\n\") //convert list into an array \r\n\r\narrayServices.each { //loop thru each item to see if it matches spec\r\n    if (it.indexOf(\"@\") == -1 && it.matches(regExp) )\r\n    {println \"${it}##${it}\"}\r\n}\r\nreturn 0"}}]]></adlist>
         <schemaVersion>2</schemaVersion>
         <dataSourceType>1</dataSourceType>
         <attributes>
@@ -121,97 +100,70 @@ return 0</wildcardgroovyscript>
         </attribute>
         <attribute>
             <name>scriptgroovy</name>
-            <value>host = hostProps.get(&#34;system.hostname&#34;)
-user = hostProps.get(&#34;ssh.user&#34;)
-pass = hostProps.get(&#34;ssh.pass&#34;)
+            <value>regExp_raw = hostProps.get(&#34;Services_to_monitor&#34;)
+regExp = &#39;(&#39; + regExp_raw + &#39;)&#39;
+user       = hostProps.get(&#34;ssh.user&#34;)
+pass       = hostProps.get(&#34;ssh.pass&#34;)
+host       = hostProps.get(&#34;system.hostname&#34;)
 port = 22
-regExp = hostProps.get(&#34;Services_to_monitor&#34;)
-
 import com.jcraft.jsch.*
 
-String ParseLinuxVersion (String LinuxVersion)
-{
-    String parsedVersionPart = LinuxVersion.split(&#34; &#34;)[1]
-    if (parsedVersionPart.matches(&#34;.*el7.*&#34;))
-    {
-        return &#34;RHEL7&#34;
-    }
-    else if (parsedVersionPart.matches(&#34;.*el6.*&#34;))
-    {
-        return &#34;RHEL6&#34;
-    }
-    else
-    {
-        return &#34;&#34;
-    }
-}
-
-String ExecuteSSHCommand (String hostName, String userName, String password, int port, String command)
-{
+String ExecuteSSHCommand (String hostName, String userName, String password, int port, String command) {
     JSch jsch = new JSch()
     Session session = jsch.getSession(userName, hostName, port)
     session.setPassword(password)
     session.setConfig(&#34;StrictHostKeyChecking&#34;, &#34;no&#34;)
-
     session.connect()
     Channel channel = session.openChannel(&#34;exec&#34;)
-
     channel.setCommand(command)
-
     InputStream commandOutput = channel.getInputStream()
     channel.connect()
-
     String outputString = commandOutput.text
-
     channel.disconnect()
     session.disconnect()
-
     return outputString
 }
 
-String getServiceListCommand
-String servicesStateCommand
-String rawServiceStates
-String servicesStartCommand
-//variable for bash command - obtain list of services
-
-String linuxVersion = ExecuteSSHCommand(host, user, pass, port, &#34;uname -mrs&#34;)
-
-String targetLinuxVersion = ParseLinuxVersion(linuxVersion)
-
-if (! targetLinuxVersion)
-{
-    return 1
+String which_command (String hostName, String userName, String password, int port) { //run the which command to see which one is present
+    String isSystemctlPresent = ExecuteSSHCommand(hostName, userName, password, port, &#34;which systemctl&#34;)
+    String isChkconfigPresent = ExecuteSSHCommand(hostName, userName, password, port, &#34;which chkconfig&#34;)
+    if (isSystemctlPresent) {return &#34;SYSTEMCTL&#34;}
+    else if ((! isSystemctlPresent) &#38;&#38; isChkconfigPresent)
+    {return &#34;CHKCONFIG&#34;}
+    else {return &#34;&#34;}
 }
 
-switch (targetLinuxVersion)
-{
-    case &#34;RHEL7&#34;:
-        getServiceListCommand = &#39;systemctl list-unit-files -t service | awk \&#39;{if(NR&#62;1)print}\&#39; | awk \&#39;/^$/{exit} {print $0}\&#39; | awk \&#39;{print ($1)}\&#39; | awk \&#39;{gsub(&#34;.service&#34;,&#34;&#34;);print}\&#39;&#39;
+String getServiceListCommand
+String servicesStateCommand  //state
+String rawServiceStates
+String servicesStartCommand  //start
+String command_to_use = which_command(host, user, pass, port)
+
+if (! command_to_use) {return 1} // if neither command is present give error
+
+switch (command_to_use) { //build the command including parameters
+    case &#34;SYSTEMCTL&#34;:
+        getServiceListCommand = &#39;systemctl -t service --all | awk \&#39;{if(NR&#62;1)print}\&#39; | awk \&#39;/^$/{exit} {print $0}\&#39; | awk \&#39;{print ($1)}\&#39; | awk \&#39;{gsub(&#34;.service&#34;,&#34;&#34;);print}\&#39;&#39;
         // Obtain all service units, remove header line, remove totals line (stop processing after empty line), print only service name
         break
-    case &#34;RHEL6&#34;:
+    case &#34;CHKCONFIG&#34;:
         getServiceListCommand = &#39;chkconfig --list | awk \&#39;{print $1}\&#39;&#39;
         break
 }
 
 String rawListOfServices = ExecuteSSHCommand(host, user, pass, port, getServiceListCommand)
-
-String [] arrayServices = rawListOfServices.split(&#34;\n&#34;)
+String [] arrayServices = rawListOfServices.split(&#34;\n&#34;) // convert list to array
 String [] matchedArrayServices = []
 
-// Array of services which matched regexp
-arrayServices.each {
+arrayServices.each {  // Array of services that match RegEx
     if (it.indexOf(&#34;@&#34;) == -1 &#38;&#38; it.matches(regExp) )
-    {
-        matchedArrayServices += it
-    }
+    {matchedArrayServices += it}
 }
 
 ArrayList serviceStatesArray = new ArrayList&#60;&#62;()
 LinkedHashMap singleServiceObject
 
-//Create results object - service name and exit code, if service running - 0, is started from first attempt - 1
+//Create results object - service name and exit code, if service running - 0, if first restart worked - 1
 matchedArrayServices.each {
     singleServiceObject = new LinkedHashMap()
     singleServiceObject.serviceName = it
@@ -222,67 +174,57 @@ matchedArrayServices.each {
 //Create command to get state of services
 String matchedServiceString = matchedArrayServices.join(&#34; &#34;)
 
-switch (targetLinuxVersion)
-{
-    case &#34;RHEL7&#34;:
+switch (command_to_use) {
+    case &#34;SYSTEMCTL&#34;:
         servicesStateCommand = &#39;services=(&#39; + matchedServiceString + &#39;); for i in ${services[@]}; do state=$(systemctl is-active $i); echo $i=$state; done&#39;
         break
-    case &#34;RHEL6&#34;:
+    case &#34;CHKCONFIG&#34;:
         servicesStateCommand = &#39;services=(&#39; + matchedServiceString + &#39;); for i in ${services[@]}; do state=$(service $i status); echo $i=$state; done&#39;
         break
 }
 
 rawServiceStates = ExecuteSSHCommand(host, user, pass, port, servicesStateCommand)
 
-//Parse response and update results object
+//get response and update results object
 String [] singleServiceInfo
 String [] serviceStateString = rawServiceStates.split(&#34;\n&#34;)
 serviceStateString.each{
     singleServiceInfo = it.split(&#34;=&#34;)
-    if ((singleServiceInfo[1] != &#34;active&#34; &#38;&#38; targetLinuxVersion == &#34;RHEL7&#34;) || ((! singleServiceInfo[1].matches(&#34;.*is running.*&#34;)) &#38;&#38; targetLinuxVersion == &#34;RHEL6&#34;))
-    {
-        serviceStatesArray.find{it.serviceName == singleServiceInfo[0]}.currentState++
-    }
+    if ((singleServiceInfo[1] != &#34;active&#34; &#38;&#38; command_to_use == &#34;SYSTEMCTL&#34;) || ((! singleServiceInfo[1].matches(&#34;.*is running.*&#34;)) &#38;&#38; command_to_use == &#34;CHKCONFIG&#34;))
+    {serviceStatesArray.find{it.serviceName == singleServiceInfo[0]}.currentState++}
 }
-// find not running services, if find some, create start command
+// find not running services, if some found, create start command
 matchedServiceString = serviceStatesArray.findAll{it.currentState == 1}.serviceName.join(&#34; &#34;)
-if (matchedServiceString)
-{
-    switch (targetLinuxVersion)
-    {
-        case &#34;RHEL7&#34;:
+if (matchedServiceString){
+    switch (command_to_use) {
+        case &#34;SYSTEMCTL&#34;:
             servicesStateCommand = &#39;services=(&#39; + matchedServiceString + &#39;); for i in ${services[@]}; do state=$(systemctl is-active $i); echo $i=$state; done&#39;
             servicesStartCommand = &#39;services=(&#39; + matchedServiceString + &#39;); for i in ${services[@]}; do state=$(systemctl start $i); done&#39;
             break
-        case &#34;RHEL6&#34;:
+        case &#34;CHKCONFIG&#34;:
             servicesStateCommand = &#39;services=(&#39; + matchedServiceString + &#39;); for i in ${services[@]}; do state=$(service $i status); echo $i=$state; done&#39;
             servicesStartCommand = &#39;services=(&#39; + matchedServiceString + &#39;); for i in ${services[@]}; do state=$(service $i start); done&#39;
             break
     }
     ExecuteSSHCommand(host, user, pass, port, servicesStartCommand)
-    sleep(5000)
+    sleep(5000) //wait 5 seconds for it to start
     rawServiceStates = ExecuteSSHCommand(host, user, pass, port, servicesStateCommand)
-
     serviceStateString = rawServiceStates.split(&#34;\n&#34;)
     serviceStateString.each {
         singleServiceInfo = it.split(&#34;=&#34;)
-        if ((singleServiceInfo[1] != &#34;active&#34; &#38;&#38; targetLinuxVersion == &#34;RHEL7&#34;) || ((! singleServiceInfo[1].matches(&#34;.*is running.*&#34;)) &#38;&#38; targetLinuxVersion == &#34;RHEL6&#34;))
-        {
-            serviceStatesArray.find { it.serviceName == singleServiceInfo[0] }.currentState++
-        }
+        if ((singleServiceInfo[1] != &#34;active&#34; &#38;&#38; command_to_use == &#34;SYSTEMCTL&#34;) || ((! singleServiceInfo[1].matches(&#34;.*is running.*&#34;)) &#38;&#38; command_to_use == &#34;CHKCONFIG&#34;))
+        {serviceStatesArray.find { it.serviceName == singleServiceInfo[0] }.currentState++}
     }
     matchedServiceString = serviceStatesArray.findAll{it.currentState == 2}.serviceName.join(&#34; &#34;)
 }
 
-if (matchedServiceString)
-{
-    switch (targetLinuxVersion)
-    {
-        case &#34;RHEL7&#34;:
+if (matchedServiceString) {
+    switch (command_to_use) {
+        case &#34;SYSTEMCTL&#34;:
             servicesStateCommand = &#39;services=(&#39; + matchedServiceString + &#39;); for i in ${services[@]}; do state=$(systemctl is-active $i); echo $i=$state; done&#39;
             servicesStartCommand = &#39;services=(&#39; + matchedServiceString + &#39;); for i in ${services[@]}; do state=$(systemctl start $i); done&#39;
             break
-        case &#34;RHEL6&#34;:
+        case &#34;CHKCONFIG&#34;:
             servicesStateCommand = &#39;services=(&#39; + matchedServiceString + &#39;); for i in ${services[@]}; do state=$(service $i status); echo $i=$state; done&#39;
             servicesStartCommand = &#39;services=(&#39; + matchedServiceString + &#39;); for i in ${services[@]}; do state=$(service $i start); done&#39;
             break
@@ -294,10 +236,8 @@ if (matchedServiceString)
     serviceStateString = rawServiceStates.split(&#34;\n&#34;)
     serviceStateString.each {
         singleServiceInfo = it.split(&#34;=&#34;)
-        if ((singleServiceInfo[1] != &#34;active&#34; &#38;&#38; targetLinuxVersion == &#34;RHEL7&#34;) || ((! singleServiceInfo[1].matches(&#34;.*is running.*&#34;)) &#38;&#38; targetLinuxVersion == &#34;RHEL6&#34;))
-        {
-            serviceStatesArray.find { it.serviceName == singleServiceInfo[0] }.currentState++
-        }
+        if ((singleServiceInfo[1] != &#34;active&#34; &#38;&#38; command_to_use == &#34;SYSTEMCTL&#34;) || ((! singleServiceInfo[1].matches(&#34;.*is running.*&#34;)) &#38;&#38; command_to_use == &#34;CHKCONFIG&#34;))
+        {serviceStatesArray.find { it.serviceName == singleServiceInfo[0] }.currentState++}
     }
 }
 
@@ -351,6 +291,28 @@ return 0</value>
             <alertTransitionIval>0</alertTransitionIval>
             <alertClearTransitionIval>0</alertClearTransitionIval>
         </datapoint>
+        <datapoint>
+            <name>milliseconds_to_run</name>
+            <dataType>4</dataType>
+            <type>2</type>
+            <postprocessormethod>none</postprocessormethod>
+            <postprocessorparam></postprocessorparam>
+            <usevalue>responseTime</usevalue>
+            <alertexpr>&#62; 22111 timezone=America/Los_Angeles</alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody></alertbody>
+            <description></description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>0</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
         </datapoints>
         <graphs>
         <graph>
@@ -358,8 +320,8 @@ return 0</value>
             <title>Service restart Linux</title>
             <verticallabel>status 0=ok</verticallabel>
             <rigid>false</rigid>
-            <maxvalue>NaN</maxvalue>
-            <minvalue>NaN</minvalue>
+            <maxvalue>4.0</maxvalue>
+            <minvalue>0.0</minvalue>
             <displayprio>1</displayprio>
             <timescale>1day</timescale>
             <base1024>false</base1024>
